@@ -1,6 +1,3 @@
-//go:build darwin
-// +build darwin
-
 package manager
 
 import (
@@ -39,6 +36,7 @@ func InvokeFunction(id, input string) (*InvokeResult, error) {
 	return invokeBin(fn.BinPath, input)
 }
 
+// Wasm 沙箱环境是最小权限：只允许标准输入/输出（可由宿主捕获），不能访问宿主文件、环境变量、网络或其它敏感资源。
 func invokeWasm(wasmPath, input string) (*InvokeResult, error) {
 	ctx := context.Background()
 	wasmBytes, err := os.ReadFile(wasmPath)
