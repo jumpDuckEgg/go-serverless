@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go-serverless/model"
 	"io"
 	"mime/multipart"
@@ -68,7 +69,7 @@ func RegisterFunction(name string, file multipart.File, version string, ext stri
 		return nil, err
 	}
 
-	var binPath string
+	var binPath, wasmPath string
 
 	if ext == ".zip" {
 		// 保存 zip 到本地临时路径
@@ -113,6 +114,15 @@ func RegisterFunction(name string, file multipart.File, version string, ext stri
 			return nil, err
 		}
 
+		// 新增：用 tinygo 生成 wasm
+		wasmPath = filepath.Join(absFnDir, "main.wasm")
+		buildWasmErr := buildWasmFunction(mainDir, wasmPath)
+		if buildWasmErr != nil {
+			// 生成 wasm 失败不致命，只记录日志
+			fmt.Println("tinygo build wasm error:", buildWasmErr)
+			wasmPath = ""
+		}
+
 	} else if ext == ".go" {
 		srcPath := filepath.Join(fnDir, "main.go")
 		out, err := os.Create(srcPath)
@@ -125,15 +135,41 @@ func RegisterFunction(name string, file multipart.File, version string, ext stri
 		}
 		defer out.Close()
 
-		binPath = filepath.Join(fnDir, "main.bin")
+		// 1. 自动生成 go.mod（如果不存在）
+		goModPath := filepath.Join(fnDir, "go.mod")
+		if _, err := os.Stat(goModPath); os.IsNotExist(err) {
+			modContent := []byte("module example.com/tmpmod\n\ngo 1.20\n")
+			if err := os.WriteFile(goModPath, modContent, 0644); err != nil {
+				return nil, err
+			}
+		}
 
-		cmd := exec.Command("go", "build", "-o", binPath, srcPath)
-
+		// 2. 先 go mod tidy（可选，让依赖全自动下载）
+		cmd := exec.Command("go", "mod", "tidy")
+		cmd.Dir = fnDir
 		cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return nil, errors.New("go mod tidy error: " + string(out))
+		}
+
+		absFnDir, err := filepath.Abs(fnDir) // 保证用绝对路径
+
+		binPath = filepath.Join(absFnDir, "main.bin")
+
+		cmd = exec.Command("go", "build", "-o", binPath, srcPath)
+
+		cmd.Env = append(os.Environ(), "GO111MODULE=on")
 
 		buildOut, err := cmd.CombinedOutput()
 		if err != nil {
 			return nil, errors.New("go build error: " + string(buildOut))
+		}
+		// 新增：用 tinygo 生成 wasm
+		wasmPath = filepath.Join(absFnDir, "main.wasm")
+		buildWasmErr := buildWasmFunction(fnDir, wasmPath)
+		if buildWasmErr != nil {
+			fmt.Println("tinygo build wasm error:", buildWasmErr)
+			wasmPath = ""
 		}
 	} else {
 		// 假如上传的是二进制文件
@@ -154,6 +190,7 @@ func RegisterFunction(name string, file multipart.File, version string, ext stri
 		Version:     version,
 		Name:        name,
 		BinPath:     binPath,
+		WasmPath:    wasmPath,
 		CreatedAt:   time.Now(),
 		Description: "",
 	}
@@ -246,7 +283,7 @@ func LoadAllFunctions(baseDir string) error {
 	storeLock.Lock()
 	defer storeLock.Unlock()
 
-	files, err := os.ReadDir(baseDir)
+	funcDirs, err := os.ReadDir(baseDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // 如果目录不存在，直接返回
@@ -254,33 +291,48 @@ func LoadAllFunctions(baseDir string) error {
 		return err
 	}
 
-	for _, file := range files {
-		if !file.IsDir() {
+	for _, funcDir := range funcDirs {
+		if !funcDir.IsDir() {
 			continue
 		}
-		fnDir := filepath.Join(baseDir, file.Name())
-		metaPath := filepath.Join(fnDir, "meta.json")
-		binPath := filepath.Join(fnDir, "main.bin")
-		if _, err := os.Stat(binPath); err != nil {
-			continue // 如果没有 main.bin 文件，跳过这个目录
-		}
+		funcNameDir := filepath.Join(baseDir, funcDir.Name())
 
-		if _, err := os.Stat(metaPath); err != nil {
-			continue // 如果没有 meta.json 文件，跳过这个目录
-		}
-
-		data, err := os.ReadFile(metaPath)
+		// 第二层（版本）目录
+		versionDirs, err := os.ReadDir(funcNameDir)
 		if err != nil {
-			continue // 如果读取 meta.json 失败，跳过这个目录
+			continue // 可能不是目录
 		}
+		for _, versionDir := range versionDirs {
+			if !versionDir.IsDir() {
+				continue
+			}
+			fnDir := filepath.Join(funcNameDir, versionDir.Name())
+			metaPath := filepath.Join(fnDir, "meta.json")
+			binPath := filepath.Join(fnDir, "main.bin")
+			wasmPath := filepath.Join(fnDir, "main.wasm")
+			if _, err := os.Stat(binPath); err != nil {
+				continue // 没有 main.bin 跳过
+			}
+			if _, err := os.Stat(metaPath); err != nil {
+				continue // 没有 meta.json 跳过
+			}
 
-		var fn model.Function
-		if err := json.Unmarshal(data, &fn); err != nil {
-			continue // 如果解析失败，跳过这个目录
+			data, err := os.ReadFile(metaPath)
+			if err != nil {
+				continue
+			}
+
+			var fn model.Function
+			if err := json.Unmarshal(data, &fn); err != nil {
+				continue
+			}
+
+			fn.BinPath = binPath
+			if _, err := os.Stat(wasmPath); err == nil {
+				fn.WasmPath = wasmPath
+			}
+			functionStore[fn.ID] = &fn
 		}
-
-		fn.BinPath = binPath // 确保 BinPath 正确
-		functionStore[fn.ID] = &fn
 	}
 	return nil
 }
@@ -311,6 +363,18 @@ func ensureGoMod(dir string) error {
 		// 自动生成
 		modContent := []byte("module example.com/tmpmod\n\ngo 1.20\n")
 		return os.WriteFile(goModPath, modContent, 0644)
+	}
+	return nil
+}
+
+// 新增：用 tinygo 构建 wasm
+func buildWasmFunction(mainDir, wasmPath string) error {
+	cmd := exec.Command("tinygo", "build", "-o", wasmPath, "-target=wasi", ".")
+	cmd.Dir = mainDir
+	cmd.Env = append(os.Environ(), "GO111MODULE=on")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tinygo build wasm error: %v\n%s", err, string(out))
 	}
 	return nil
 }

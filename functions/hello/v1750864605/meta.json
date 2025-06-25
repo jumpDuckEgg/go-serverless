@@ -1,0 +1,9 @@
+{
+  "id": "b846a82c-2743-4772-9f83-8a8511e876c3",
+  "version": "v1750864605",
+  "name": "hello",
+  "binPath": "/Users/xuxinguo/Desktop/go/go-serverless/functions/hello/v1750864605/main.bin",
+  "wasmPath": "/Users/xuxinguo/Desktop/go/go-serverless/functions/hello/v1750864605/main.wasm",
+  "description": "",
+  "created_at": "2025-06-25T23:16:48.494511+08:00"
+}
