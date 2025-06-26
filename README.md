@@ -44,7 +44,7 @@
 
 3. **API 示例**
 
-   - 注册函数（POST `/functions`，支持上传 .go/.zip/.bin 文件）
+   - 注册函数（POST `/functions`，支持上传 .go/.zip(包含 .go/go.mod 项目压缩包)/.bin 文件）
    - 查询函数列表（GET `/functions`）
    - 查询单个函数（GET `/functions/:id`）
    - 删除函数（DELETE `/functions/:id`）
@@ -69,7 +69,6 @@
 
 - Serverless 函数计算
 - 多租户安全代码执行
-- 教学、实验型云函数平台
 
 ## 参考
 
@@ -79,4 +78,30 @@
 
 ---
 
-如需二次开发或定制，欢迎提交 Issue 或
+## 架构图
+
+![alt text](image.png)
+
+```mermaid
+flowchart TD
+    User[用户/客户端] -->|HTTP API| Gin[Gin 路由]
+    Gin --> Handler[Handler 层]
+    Handler --> Manager[Manager 层]
+    Manager -->|注册/管理| Storage[本地存储<br>（functions/目录）]
+    Manager -->|执行| Executor[执行器]
+    Executor -->|二进制| BinExec[本地进程]
+    Executor -->|Wasm| WasmExec[Wazero 沙箱]
+    BinExec --输出--> Handler
+    WasmExec --输出--> Handler
+    Handler --> Gin
+    Gin -->|响应| User
+```
+
+- 用户通过 HTTP API 上传、调用、管理函数
+- Gin 路由分发请求到 Handler
+- Handler 调用 Manager 进行函数注册、查询、删除、执行等操作
+- Manager 负责函数元数据管理和本地存储
+- 执行时，支持本地二进制或 Wasm 沙箱（Wazero）两种模式
+- 执行结果返回给用户
+
+> 你也可以将此 mermaid 图粘贴到 [Mermaid Live Editor](https://mermaid.live/) 查看可视化效果。
